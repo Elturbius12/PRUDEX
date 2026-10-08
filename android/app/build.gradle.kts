@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.example.asistente_pl"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

@@ -9,6 +9,7 @@ class AppTheme {
   static const Color azulPrincipal = Color(0xFF71A7FF);
   static const Color azulOscuro    = Color(0xFF3D6EBF);
   static const Color verdeAccion   = Color(0xFF28D6BD);
+  static const Color rojoAlerta    = Color(0xFFFF6B6B);
 
   static String? _fontFamily = GoogleFonts.inter().fontFamily;
 

@@ -10,7 +10,11 @@ import '../data/ejemplos.dart' as ejemplos;
 /// el asistente los recuerde entre usos sin depender de un backend
 /// (ver sección 9.4 del documento: "Módulo de perfil de empresa").
 class StorageService {
-  static const _kPerfil = 'perfil_empresa';
+  // NOTA: usa una clave distinta a la de DatabaseService ('perfil_empresa'),
+  // que guarda un Map con un formato diferente (legado, usado por
+  // config_screen.dart) — compartir la misma clave corrompería los datos
+  // de uno u otro sistema.
+  static const _kPerfil = 'perfil_empresa_v2';
   static const _kProductos = 'produccion_productos';
   static const _kHilo = 'produccion_hilo_disponible';
   static const _kTiempo = 'produccion_tiempo_disponible';

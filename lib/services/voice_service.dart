@@ -20,6 +20,9 @@ class VoiceService extends ChangeNotifier {
   String get textoReconocido => _textoReconocido;
   bool get voskDisponible => _voskDisponible;
 
+  /// Alias de [isListening] — convención usada por panel_asistente.dart.
+  bool get escuchando => _isListening;
+
   /// Inicializa Vosk con el modelo en español.
   Future<void> init() async {
     try {

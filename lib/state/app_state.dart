@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:asistente_pl/models/lp_models.dart';
+import 'package:asistente_pl/models/producto.dart';
+import 'package:asistente_pl/models/origen_destino.dart';
+import 'package:asistente_pl/models/perfil_empresa.dart';
+import 'package:asistente_pl/models/mensaje_chat.dart' as voz;
+import 'package:asistente_pl/data/ejemplos.dart' as ejemplos;
 import 'package:asistente_pl/services/database_service.dart';
 import 'package:asistente_pl/services/gemini_service.dart';
 import 'package:asistente_pl/services/voice_service.dart';
 import 'package:asistente_pl/services/supabase_service.dart';
 import 'package:asistente_pl/services/excel_service.dart';
+import 'package:asistente_pl/services/storage_service.dart';
+import 'package:asistente_pl/services/nlu_service.dart';
 import 'package:asistente_pl/core/solver_engine.dart';
 import 'package:asistente_pl/core/explicacion_service.dart';
+import 'package:asistente_pl/core/lp_solver.dart';
 import 'package:uuid/uuid.dart';
 
 class AppState extends ChangeNotifier {
@@ -17,9 +25,10 @@ class AppState extends ChangeNotifier {
   final ExcelService excel = ExcelService();
   final SolverEngine solver = SolverEngine();
   final ExplicacionService explicaciones = ExplicacionService();
+  final StorageService storage = StorageService();
   final _uuid = const Uuid();
 
-  // ── Estado base ───────────────────────────────────────────────
+  // ── Estado base (flujo de chat original) ────────────────────────
   String _modo = 'negocio'; // 'negocio' o 'estudiante'
   int _tabActual = 0;
   int? _pestanaSolicitada;
@@ -29,18 +38,30 @@ class AppState extends ChangeNotifier {
   List<ProblemaLP> _modelosGuardados = [];
   bool _resolviendo = false;
   Map<String, dynamic>? _perfilEmpresa;
-  String _nivelExplicacion = 'simple'; // 'simple' | 'detallado' | 'tecnico'
+
+  // ── Perfil de empresa (onboarding — perfil_screen.dart) ─────────
+  PerfilEmpresa _perfil = PerfilEmpresa();
+
+  // ── Nivel de explicación (asistente de voz) ─────────────────────
+  voz.NivelExplicacion _nivelExplicacion = voz.NivelExplicacion.ejecutivo;
 
   // ── Módulo de producción ──────────────────────────────────────
   double _hiloDisponible = 100.0;
   double _tiempoDisponible = 80.0;
-  List<Map<String, dynamic>> _productos = [];
+  List<Producto> _productos = [];
   ResultadoLP? _resultadoProduccion;
 
   // ── Módulo de rutas / transporte ──────────────────────────────
-  List<Map<String, dynamic>> _origenes = [];
-  List<Map<String, dynamic>> _destinos = [];
+  List<Origen> _origenes = [];
+  List<Destino> _destinos = [];
+  List<List<double>> _costos = [];
   ResultadoLP? _resultadoRutas;
+  String? _notaBalanceRutas;
+
+  // ── Asistente de voz (panel_asistente.dart) ─────────────────────
+  final List<voz.MensajeChat> _historial = [];
+  String _transcripcionParcial = '';
+  bool _vozActiva = true;
 
   // ── Getters base ──────────────────────────────────────────────
   String get modo => _modo;
@@ -55,24 +76,55 @@ class AppState extends ChangeNotifier {
   bool get cargando => _resolviendo;
   Map<String, dynamic>? get perfilEmpresa => _perfilEmpresa;
   bool get esEstudiante => _modo == 'estudiante';
-  String get nivelExplicacion => _nivelExplicacion;
+  voz.NivelExplicacion get nivelExplicacion => _nivelExplicacion;
 
-  /// Perfil no nulable — devuelve PerfilEmpresa vacío si aún no se configuró.
-  PerfilEmpresa get perfil {
-    if (_perfilEmpresa == null) return const PerfilEmpresa();
-    return PerfilEmpresa.fromJson(_perfilEmpresa!);
-  }
+  /// Perfil (onboarding) no nulable — usado por perfil_screen.dart.
+  PerfilEmpresa get perfil => _perfil;
 
   // ── Getters módulo producción ─────────────────────────────────
   double get hiloDisponible => _hiloDisponible;
   double get tiempoDisponible => _tiempoDisponible;
-  List<Map<String, dynamic>> get productos => _productos;
+  List<Producto> get productos => _productos;
   ResultadoLP? get resultadoProduccion => _resultadoProduccion;
 
+  /// Resumen hablado de producción, o null si aún no hay resultado.
+  String? get resumenHabladoProduccion {
+    final r = _resultadoProduccion;
+    if (r == null) return null;
+    if (r.estado != EstadoSolucion.optimo) {
+      return 'No se encontró una combinación factible de producción con los datos actuales.';
+    }
+    final buf = StringBuffer(
+        'La utilidad máxima es ${r.z?.toStringAsFixed(2) ?? '0.00'} soles. ');
+    for (var i = 0; i < r.nombresVariables.length && i < r.x.length; i++) {
+      if (r.x[i] > 0.01) {
+        buf.write('Produce ${r.x[i].toStringAsFixed(0)} unidades de ${r.nombresVariables[i]}. ');
+      }
+    }
+    return buf.toString();
+  }
+
   // ── Getters módulo rutas ──────────────────────────────────────
-  List<Map<String, dynamic>> get origenes => _origenes;
-  List<Map<String, dynamic>> get destinos => _destinos;
+  List<Origen> get origenes => _origenes;
+  List<Destino> get destinos => _destinos;
+  List<List<double>> get costos => _costos;
   ResultadoLP? get resultadoRutas => _resultadoRutas;
+  List<Origen> get origenesUsadosRuta => _origenes;
+  List<Destino> get destinosUsadosRuta => _destinos;
+  String? get notaBalanceRutas => _notaBalanceRutas;
+
+  /// Resumen hablado de rutas, o null si aún no hay resultado.
+  String? get resumenHabladoRutas {
+    final r = _resultadoRutas;
+    if (r == null) return null;
+    return 'El costo mínimo de transporte es ${r.z?.toStringAsFixed(2) ?? '0.00'} soles, '
+        'repartiendo entre ${_origenes.length} origen(es) y ${_destinos.length} destino(s).';
+  }
+
+  // ── Getters asistente de voz ────────────────────────────────────
+  List<voz.MensajeChat> get historial => _historial;
+  String get transcripcionParcial => _transcripcionParcial;
+  bool get vozActiva => _vozActiva;
 
   // ── Constructor ───────────────────────────────────────────────
   AppState({required this.db}) {
@@ -84,6 +136,15 @@ class AppState extends ChangeNotifier {
     _modelosGuardados = db.listarModelos();
     _perfilEmpresa = db.obtenerPerfil();
     await voice.init();
+
+    _perfil = await storage.cargarPerfil();
+    _productos = await storage.cargarProductos();
+    _hiloDisponible = await storage.cargarHiloDisponible() ?? ejemplos.hiloEjemplo;
+    _tiempoDisponible = await storage.cargarTiempoDisponible() ?? ejemplos.tiempoEjemplo;
+    _origenes = await storage.cargarOrigenes();
+    _destinos = await storage.cargarDestinos();
+    _costos = await storage.cargarCostos();
+
     notifyListeners();
   }
 
@@ -111,8 +172,8 @@ class AppState extends ChangeNotifier {
     // Sin notifyListeners — evita rebuild innecesario.
   }
 
-  /// Cambia el nivel de detalle de las explicaciones ('simple', 'detallado', 'tecnico').
-  void cambiarNivelExplicacion(String nivel) {
+  /// Cambia el nivel de detalle de las explicaciones (ejecutivo/técnico).
+  void cambiarNivelExplicacion(voz.NivelExplicacion nivel) {
     _nivelExplicacion = nivel;
     notifyListeners();
   }
@@ -265,14 +326,16 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Perfil ────────────────────────────────────────────────────
+  /// Acepta tanto el perfil legado (Map, usado por config_screen.dart) como
+  /// el nuevo [PerfilEmpresa] tipado (usado por perfil_screen.dart) — cada
+  /// uno se persiste en su propio sistema de almacenamiento.
   Future<void> guardarPerfil(dynamic perfilData) async {
-    if (perfilData is Map<String, dynamic>) {
+    if (perfilData is PerfilEmpresa) {
+      _perfil = perfilData;
+      await storage.guardarPerfil(perfilData);
+    } else if (perfilData is Map<String, dynamic>) {
       _perfilEmpresa = perfilData;
       await db.guardarPerfil(perfilData);
-    } else if (perfilData is PerfilEmpresa) {
-      final json = perfilData.toJson();
-      _perfilEmpresa = json;
-      await db.guardarPerfil(json);
     }
     notifyListeners();
   }
@@ -301,33 +364,53 @@ class AppState extends ChangeNotifier {
 
   void setHiloDisponible(double valor) {
     _hiloDisponible = valor;
+    storage.guardarHiloDisponible(valor);
     notifyListeners();
   }
 
   void setTiempoDisponible(double valor) {
     _tiempoDisponible = valor;
+    storage.guardarTiempoDisponible(valor);
     notifyListeners();
   }
 
   void agregarProducto() {
-    _productos.add({
-      'nombre': 'Producto ${_productos.length + 1}',
-      'gananciaPorUnidad': 0.0,
-      'hiloPorUnidad': 0.0,
-      'tiempoPorUnidad': 0.0,
-    });
+    _productos.add(Producto.vacio(_productos.length + 1));
+    storage.guardarProductos(_productos);
     notifyListeners();
   }
 
-  void actualizarProductoCampo(int index, String campo, dynamic valor) {
+  void actualizarProductoCampo(int index, String campo, String valor) {
     if (index < 0 || index >= _productos.length) return;
-    _productos[index][campo] = valor;
+    final p = _productos[index];
+    switch (campo) {
+      case 'nombre':
+        p.nombre = valor;
+        break;
+      case 'utilidad':
+        p.utilidad = double.tryParse(valor) ?? p.utilidad;
+        break;
+      case 'hilo':
+        p.hilo = double.tryParse(valor) ?? p.hilo;
+        break;
+      case 'tiempo':
+        p.tiempo = double.tryParse(valor) ?? p.tiempo;
+        break;
+      case 'demanda':
+        p.demanda = double.tryParse(valor) ?? p.demanda;
+        break;
+      case 'demandaMinima':
+        p.demandaMinima = double.tryParse(valor) ?? p.demandaMinima;
+        break;
+    }
+    storage.guardarProductos(_productos);
     notifyListeners();
   }
 
   void quitarProducto(int index) {
     if (index < 0 || index >= _productos.length) return;
     _productos.removeAt(index);
+    storage.guardarProductos(_productos);
     notifyListeners();
   }
 
@@ -340,31 +423,44 @@ class AppState extends ChangeNotifier {
     await Future.delayed(const Duration(milliseconds: 50));
 
     final variables = _productos
-        .map((p) => VariableLP(
-              nombre: p['nombre'] as String? ?? 'Producto',
-              coeficienteObjetivo:
-                  (p['gananciaPorUnidad'] as num?)?.toDouble() ?? 0.0,
-            ))
+        .map((p) => VariableLP(nombre: p.nombre, coeficienteObjetivo: p.utilidad))
         .toList();
 
-    final restricciones = [
+    final restricciones = <RestriccionLP>[
       RestriccionLP(
         nombre: 'Hilo disponible',
-        coeficientes: _productos
-            .map((p) => (p['hiloPorUnidad'] as num?)?.toDouble() ?? 0.0)
-            .toList(),
+        coeficientes: _productos.map((p) => p.hilo).toList(),
         tipo: TipoRestriccion.menorIgual,
         rhs: _hiloDisponible,
       ),
       RestriccionLP(
         nombre: 'Tiempo disponible',
-        coeficientes: _productos
-            .map((p) => (p['tiempoPorUnidad'] as num?)?.toDouble() ?? 0.0)
-            .toList(),
+        coeficientes: _productos.map((p) => p.tiempo).toList(),
         tipo: TipoRestriccion.menorIgual,
         rhs: _tiempoDisponible,
       ),
     ];
+
+    for (var i = 0; i < _productos.length; i++) {
+      final p = _productos[i];
+      final indicador = List<double>.generate(_productos.length, (j) => j == i ? 1.0 : 0.0);
+      if (p.demanda > 0) {
+        restricciones.add(RestriccionLP(
+          nombre: 'Demanda máxima ${p.nombre}',
+          coeficientes: indicador,
+          tipo: TipoRestriccion.menorIgual,
+          rhs: p.demanda,
+        ));
+      }
+      if (p.demandaMinima > 0) {
+        restricciones.add(RestriccionLP(
+          nombre: 'Demanda mínima ${p.nombre}',
+          coeficientes: indicador,
+          tipo: TipoRestriccion.mayorIgual,
+          rhs: p.demandaMinima,
+        ));
+      }
+    }
 
     final problema = ProblemaLP(
       nombre: 'Producción óptima',
@@ -373,109 +469,91 @@ class AppState extends ChangeNotifier {
       restricciones: restricciones,
     );
 
-    _resultadoProduccion = solver.resolver(problema);
+    _resultadoProduccion = SolverLP.resolver(problema);
     _resolviendo = false;
     notifyListeners();
   }
 
   void cargarEjemploProduccion() {
-    _hiloDisponible = 100.0;
-    _tiempoDisponible = 80.0;
-    _productos = [
-      {
-        'nombre': 'Chompa',
-        'gananciaPorUnidad': 25.0,
-        'hiloPorUnidad': 3.0,
-        'tiempoPorUnidad': 2.0,
-      },
-      {
-        'nombre': 'Chaleco',
-        'gananciaPorUnidad': 18.0,
-        'hiloPorUnidad': 2.0,
-        'tiempoPorUnidad': 1.5,
-      },
-    ];
+    _hiloDisponible = ejemplos.hiloEjemplo;
+    _tiempoDisponible = ejemplos.tiempoEjemplo;
+    _productos = ejemplos.productosEjemplo();
     _resultadoProduccion = null;
+    storage.guardarHiloDisponible(_hiloDisponible);
+    storage.guardarTiempoDisponible(_tiempoDisponible);
+    storage.guardarProductos(_productos);
     notifyListeners();
-  }
-
-  String resumenHabladoProduccion() {
-    if (_resultadoProduccion == null) return 'No hay resultado de producción.';
-    if (_resultadoProduccion!.estado != EstadoSolucion.optimo) {
-      return 'No se encontró solución factible para la producción.';
-    }
-    final z = _resultadoProduccion!.valorOptimo ?? 0;
-    final vals = _resultadoProduccion!.valoresVariables;
-    final buf = StringBuffer('La ganancia máxima es ${z.toStringAsFixed(2)} soles. ');
-    for (final e in vals.entries) {
-      if (e.value > 0.01) {
-        buf.write('Produce ${e.value.toStringAsFixed(0)} unidades de ${e.key}. ');
-      }
-    }
-    return buf.toString();
   }
 
   // ── Módulo de rutas / transporte ──────────────────────────────
 
   void agregarOrigen() {
-    final costos = List<double>.filled(_destinos.length, 0.0);
-    _origenes.add({
-      'nombre': 'Origen ${_origenes.length + 1}',
-      'oferta': 0.0,
-      'costos': costos,
-    });
+    _origenes.add(Origen.vacio(_origenes.length + 1));
+    _costos.add(List<double>.filled(_destinos.length, 0.0));
+    storage.guardarOrigenes(_origenes);
+    storage.guardarCostos(_costos);
     notifyListeners();
   }
 
   void quitarOrigen(int index) {
     if (index < 0 || index >= _origenes.length) return;
     _origenes.removeAt(index);
+    if (index < _costos.length) _costos.removeAt(index);
+    storage.guardarOrigenes(_origenes);
+    storage.guardarCostos(_costos);
     notifyListeners();
   }
 
-  void actualizarOrigenCampo(int index, String campo, dynamic valor) {
+  void actualizarOrigenCampo(int index, String campo, String valor) {
     if (index < 0 || index >= _origenes.length) return;
-    _origenes[index][campo] = valor;
+    final o = _origenes[index];
+    if (campo == 'nombre') {
+      o.nombre = valor;
+    } else if (campo == 'oferta') {
+      o.oferta = double.tryParse(valor) ?? o.oferta;
+    }
+    storage.guardarOrigenes(_origenes);
     notifyListeners();
   }
 
   void agregarDestino() {
-    _destinos.add({
-      'nombre': 'Destino ${_destinos.length + 1}',
-      'demanda': 0.0,
-    });
-    // Agregar columna de costo (0) a cada origen existente
-    for (final o in _origenes) {
-      final costos = List<double>.from(o['costos'] as List? ?? []);
-      costos.add(0.0);
-      o['costos'] = costos;
+    _destinos.add(Destino.vacio(_destinos.length + 1));
+    for (final fila in _costos) {
+      fila.add(0.0);
     }
+    storage.guardarDestinos(_destinos);
+    storage.guardarCostos(_costos);
     notifyListeners();
   }
 
   void quitarDestino(int index) {
     if (index < 0 || index >= _destinos.length) return;
     _destinos.removeAt(index);
-    for (final o in _origenes) {
-      final costos = List<double>.from(o['costos'] as List? ?? []);
-      if (index < costos.length) costos.removeAt(index);
-      o['costos'] = costos;
+    for (final fila in _costos) {
+      if (index < fila.length) fila.removeAt(index);
     }
+    storage.guardarDestinos(_destinos);
+    storage.guardarCostos(_costos);
     notifyListeners();
   }
 
-  void actualizarDestinoCampo(int index, String campo, dynamic valor) {
+  void actualizarDestinoCampo(int index, String campo, String valor) {
     if (index < 0 || index >= _destinos.length) return;
-    _destinos[index][campo] = valor;
+    final d = _destinos[index];
+    if (campo == 'nombre') {
+      d.nombre = valor;
+    } else if (campo == 'demanda') {
+      d.demanda = double.tryParse(valor) ?? d.demanda;
+    }
+    storage.guardarDestinos(_destinos);
     notifyListeners();
   }
 
-  void actualizarCosto(int origenIdx, int destinoIdx, double valor) {
-    if (origenIdx < 0 || origenIdx >= _origenes.length) return;
-    final costos = List<double>.from(_origenes[origenIdx]['costos'] as List? ?? []);
-    if (destinoIdx < 0 || destinoIdx >= costos.length) return;
-    costos[destinoIdx] = valor;
-    _origenes[origenIdx]['costos'] = costos;
+  void actualizarCosto(int origenIdx, int destinoIdx, String valor) {
+    if (origenIdx < 0 || origenIdx >= _costos.length) return;
+    if (destinoIdx < 0 || destinoIdx >= _costos[origenIdx].length) return;
+    _costos[origenIdx][destinoIdx] = double.tryParse(valor) ?? _costos[origenIdx][destinoIdx];
+    storage.guardarCostos(_costos);
     notifyListeners();
   }
 
@@ -487,29 +565,56 @@ class AppState extends ChangeNotifier {
 
     await Future.delayed(const Duration(milliseconds: 50));
 
-    final oferta =
-        _origenes.map((o) => (o['oferta'] as num?)?.toDouble() ?? 0.0).toList();
-    final demanda =
-        _destinos.map((d) => (d['demanda'] as num?)?.toDouble() ?? 0.0).toList();
-    final matrizCostos = _origenes.map((o) {
-      final c = o['costos'] as List? ?? [];
-      return c.map((v) => (v as num?)?.toDouble() ?? 0.0).toList();
-    }).toList();
-
     final problema = ProblemaTransporte(
-      origenes: _origenes.map((o) => o['nombre'] as String? ?? '').toList(),
-      destinos: _destinos.map((d) => d['nombre'] as String? ?? '').toList(),
-      oferta: oferta,
-      demanda: demanda,
-      costos: matrizCostos,
+      origenes: _origenes.map((o) => o.nombre).toList(),
+      destinos: _destinos.map((d) => d.nombre).toList(),
+      oferta: _origenes.map((o) => o.oferta).toList(),
+      demanda: _destinos.map((d) => d.demanda).toList(),
+      costos: _costos.map((fila) => List<double>.from(fila)).toList(),
     );
 
     final resultadoTransporte = solver.resolverTransporte(problema);
+
+    final nD = _destinos.length;
+    final xPlano = <double>[];
+    for (var i = 0; i < resultadoTransporte.asignacion.length; i++) {
+      for (var j = 0; j < nD; j++) {
+        xPlano.add(resultadoTransporte.asignacion[i][j]);
+      }
+    }
+
+    final holgurasOrigen = <HolguraRestriccion>[];
+    for (var i = 0; i < _origenes.length; i++) {
+      final usado = List.generate(nD, (j) => xPlano[i * nD + j])
+          .fold(0.0, (a, b) => a + b);
+      holgurasOrigen.add(HolguraRestriccion(
+        rhs: _origenes[i].oferta,
+        usado: usado,
+        holgura: _origenes[i].oferta - usado,
+        etiqueta: _origenes[i].nombre,
+      ));
+    }
+
+    final notaBalance = resultadoTransporte.pasos
+        .firstWhere((p) => p.contains('desbalanceado'), orElse: () => '');
+    _notaBalanceRutas = notaBalance.isEmpty ? null : notaBalance;
 
     _resultadoRutas = ResultadoLP(
       estado: EstadoSolucion.optimo,
       valorOptimo: resultadoTransporte.costoTotal,
       valoresVariables: const {},
+      x: xPlano,
+      z: resultadoTransporte.costoTotal,
+      nombresVariables: [
+        for (final o in _origenes)
+          for (final d in _destinos) '${o.nombre}→${d.nombre}',
+      ],
+      holguras: holgurasOrigen,
+      // Mismo largo que holguras: tabla_trace.dart indexa resultado.duales[i]
+      // hasta resultado.holguras.length. El método de transporte (MVP) no
+      // calcula precios sombra, así que se dejan en null ('—' en la tabla).
+      duales: List<double?>.filled(holgurasOrigen.length, null),
+      iteraciones: resultadoTransporte.pasos.length,
       explicacionSimple:
           'Costo mínimo de transporte: ${resultadoTransporte.costoTotal.toStringAsFixed(2)}',
       explicacionDetallada:
@@ -521,11 +626,64 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  String resumenHabladoRutas() {
-    if (_resultadoRutas == null) return 'No hay resultado de rutas disponible.';
-    final costo = _resultadoRutas!.valorOptimo ?? 0;
-    return 'El costo mínimo de transporte es ${costo.toStringAsFixed(2)} soles, '
-        'optimizando ${_origenes.length} origen(es) y ${_destinos.length} destino(s).';
+  void cargarEjemploRutas() {
+    _origenes = ejemplos.origenesEjemplo();
+    _destinos = ejemplos.destinosEjemplo();
+    _costos = ejemplos.costosEjemplo();
+    _resultadoRutas = null;
+    _notaBalanceRutas = null;
+    storage.guardarOrigenes(_origenes);
+    storage.guardarDestinos(_destinos);
+    storage.guardarCostos(_costos);
+    notifyListeners();
+  }
+
+  // ── Asistente de voz (panel_asistente.dart / nlu_service.dart) ──
+
+  void alternarVoz(bool activo) {
+    _vozActiva = activo;
+    if (!activo) {
+      voice.detenerHabla();
+    }
+    notifyListeners();
+  }
+
+  /// Interpreta [texto] (venga de teclado o de voz) con [NluService] y
+  /// agrega el intercambio al historial del panel del asistente.
+  void procesarComandoTexto(String texto) {
+    _historial.add(voz.MensajeChat(autor: voz.AutorMensaje.usuario, texto: texto));
+    notifyListeners();
+
+    final respuesta = NluService.procesar(texto, this);
+    _historial.add(voz.MensajeChat(autor: voz.AutorMensaje.sistema, texto: respuesta));
+    notifyListeners();
+
+    if (_vozActiva) {
+      voice.hablar(respuesta);
+    }
+  }
+
+  void iniciarEscucha() {
+    voice.startListening(
+      onResult: (texto) {
+        _transcripcionParcial = '';
+        if (texto.trim().isNotEmpty) {
+          procesarComandoTexto(texto);
+        }
+        notifyListeners();
+      },
+      onPartial: (parcial) {
+        _transcripcionParcial = parcial;
+        notifyListeners();
+      },
+    );
+    notifyListeners();
+  }
+
+  void detenerEscucha() {
+    voice.stopListening();
+    _transcripcionParcial = '';
+    notifyListeners();
   }
 
   // ── Utilidades privadas ───────────────────────────────────────

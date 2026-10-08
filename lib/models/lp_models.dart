@@ -24,10 +24,6 @@ enum MetodoSolucion {
 /// NOTA: infactible es alias de noFactible para compatibilidad.
 enum EstadoSolucion { optimo, noFactible, infactible, noAcotado, multiples, enProceso }
 
-/// Nivel de detalle de las explicaciones (usado por nlu_service.dart y
-/// tarjeta_resultado_produccion.dart).
-enum NivelExplicacion { simple, detallado, tecnico }
-
 /// Variable de decisión.
 class VariableLP {
   final String nombre;
@@ -166,8 +162,8 @@ class HolguraRestriccion {
   final String? restriccion;
   final double? rhs;
   final double? usado;
-  final String? tipo;
-  final String? etiqueta;
+  final TipoRestriccion? tipo;
+  final String etiqueta;
 
   const HolguraRestriccion({
     this.holgura = 0.0,
@@ -176,7 +172,7 @@ class HolguraRestriccion {
     this.rhs,
     this.usado,
     this.tipo,
-    this.etiqueta,
+    this.etiqueta = '',
   });
 }
 
@@ -189,7 +185,7 @@ class PasoSimplex {
   final Object? saliente;
   final double? pivote;
   final String explicacion;
-  final List<double>? filaCosto;
+  final List<double> filaCosto;
 
   PasoSimplex({
     int? iteracion,
@@ -202,11 +198,21 @@ class PasoSimplex {
     this.pivote,
     String? explicacion,
     String? nota,
-    this.filaCosto,
+    List<double>? filaCosto,
   })  : iteracion = iteracion ?? 0,
         tableau = tableau ?? tabla ?? const [],
         basicas = basicas ?? base ?? const [],
-        explicacion = explicacion ?? nota ?? '';
+        explicacion = explicacion ?? nota ?? '',
+        filaCosto = filaCosto ?? const [];
+
+  /// Alias de [tableau] — convención usada por tabla_trace.dart.
+  List<List<double>> get tabla => tableau;
+
+  /// Alias de [basicas] — convención usada por tabla_trace.dart.
+  List<String> get base => basicas;
+
+  /// Alias de [explicacion] — convención usada por tabla_trace.dart.
+  String get nota => explicacion;
 }
 
 /// Resultado del solver.
@@ -221,11 +227,11 @@ class ResultadoLP {
   final String? explicacionSimple;
   final String? explicacionDetallada;
 
-  final List<double>? x;
+  final List<double> x;
   final double? z;
-  final List<String>? nombresVariables;
-  final List<String>? nombresColumnas;
-  final List<double?>? duales;
+  final List<String> nombresVariables;
+  final List<String> nombresColumnas;
+  final List<double?> duales;
   final int? iteraciones;
 
   // trace y holguras: internamente guardados como nullable, pero expuestos
@@ -248,15 +254,19 @@ class ResultadoLP {
     this.tiempoSolucion = Duration.zero,
     this.explicacionSimple,
     this.explicacionDetallada,
-    this.x,
+    List<double>? x,
     this.z,
-    this.nombresVariables,
+    List<String>? nombresVariables,
     List<PasoSimplex>? trace,
-    this.nombresColumnas,
-    this.duales,
+    List<String>? nombresColumnas,
+    List<double?>? duales,
     List<HolguraRestriccion>? holguras,
     this.iteraciones,
-  })  : _traceInterno = trace,
+  })  : x = x ?? const [],
+        nombresVariables = nombresVariables ?? const [],
+        nombresColumnas = nombresColumnas ?? const [],
+        duales = duales ?? const [],
+        _traceInterno = trace,
         _holgurasInterno = holguras;
 }
 
@@ -394,86 +404,10 @@ enum TipoMensaje {
   cargando,
 }
 
-/// Perfil de empresa — usado por perfil_screen.dart y config_screen.dart.
-class PerfilEmpresa {
-  final String tipo;
-  final String nombre;
-  final String rubro;
-  final String? ciudad;
-  final String? descripcion;
-  final String anios;
-  final String trabajadores;
-  final String maquinas;
-  final String turnos;
-  final String notas;
-
-  const PerfilEmpresa({
-    this.tipo = 'negocio',
-    this.nombre = '',
-    this.rubro = '',
-    this.ciudad,
-    this.descripcion,
-    this.anios = '',
-    this.trabajadores = '',
-    this.maquinas = '',
-    this.turnos = '',
-    this.notas = '',
-  });
-
-  Map<String, dynamic> toJson() => {
-    'tipo': tipo,
-    'nombre': nombre,
-    'rubro': rubro,
-    'ciudad': ciudad,
-    'descripcion': descripcion,
-    'anios': anios,
-    'trabajadores': trabajadores,
-    'maquinas': maquinas,
-    'turnos': turnos,
-    'notas': notas,
-  };
-
-  factory PerfilEmpresa.fromJson(Map<String, dynamic> j) => PerfilEmpresa(
-    tipo: j['tipo'] as String? ?? 'negocio',
-    nombre: j['nombre'] as String? ?? '',
-    rubro: j['rubro'] as String? ?? '',
-    ciudad: j['ciudad'] as String?,
-    descripcion: j['descripcion'] as String?,
-    anios: j['anios'] as String? ?? '',
-    trabajadores: j['trabajadores'] as String? ?? '',
-    maquinas: j['maquinas'] as String? ?? '',
-    turnos: j['turnos'] as String? ?? '',
-    notas: j['notas'] as String? ?? '',
-  );
-}
-
-/// Producto para el módulo de producción (produccion_screen.dart).
-class Producto {
-  String nombre;
-  double gananciaPorUnidad;
-  double hiloPorUnidad;
-  double tiempoPorUnidad;
-
-  Producto({
-    this.nombre = '',
-    this.gananciaPorUnidad = 0.0,
-    this.hiloPorUnidad = 0.0,
-    this.tiempoPorUnidad = 0.0,
-  });
-}
-
-/// Origen para el módulo de rutas/transporte (rutas_screen.dart, nlu_service.dart).
-class Origen {
-  String nombre;
-  double oferta;
-
-  Origen({this.nombre = '', this.oferta = 0.0});
-}
-
-/// Destino para el módulo de rutas/transporte.
-class Destino {
-  String nombre;
-  double demanda;
-
-  Destino({this.nombre = '', this.demanda = 0.0});
-}
+// NOTA: PerfilEmpresa, Producto, Origen y Destino NO se definen aquí.
+// Sus definiciones reales y correctas viven en sus propios archivos
+// (models/perfil_empresa.dart, models/producto.dart,
+// models/origen_destino.dart) y son las que usan produccion_screen.dart,
+// rutas_screen.dart, perfil_screen.dart, nlu_service.dart y StorageService.
+// Duplicarlas aquí (como se hizo antes) provoca errores de "ambiguous
+// import" en los widgets que importan ambos archivos a la vez.
